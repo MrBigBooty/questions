@@ -1,11 +1,109 @@
 import streamlit as st
 import pandas as pd
 import random
+import sqlite3
 
 # -----------------------------------------------------------------------------
 # 1. 頁面配置與基本資料載入
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="個人專屬刷題系統", layout="wide")
+
+
+# -----------------------------------------------------------------------------
+# 1A. 永久保存使用者進度
+# -----------------------------------------------------------------------------
+# Streamlit 的 session_state 在重新整理頁面後會重新建立，因此：
+# - used_ids / wrong_ids 不只存在 session_state
+# - 同步寫入本機 SQLite
+# 只要 q.py 與 progress.db 位於同一個資料夾，重新整理/重啟程式後資料仍會保留。
+DB_FILE = "progress.db"
+
+
+def init_database():
+    conn = sqlite3.connect(DB_FILE)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS question_progress (
+            question_id TEXT PRIMARY KEY,
+            is_used INTEGER NOT NULL DEFAULT 0,
+            is_wrong INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def load_progress():
+    conn = sqlite3.connect(DB_FILE)
+    rows = conn.execute(
+        "SELECT question_id, is_used, is_wrong FROM question_progress"
+    ).fetchall()
+    conn.close()
+
+    used = {str(qid) for qid, is_used, _ in rows if is_used}
+    wrong = {str(qid) for qid, _, is_wrong in rows if is_wrong}
+    return used, wrong
+
+
+def save_progress(used_ids, wrong_ids):
+    conn = sqlite3.connect(DB_FILE)
+
+    # 先確保所有目前資料都有紀錄
+    all_ids = {str(x) for x in used_ids} | {str(x) for x in wrong_ids}
+    for qid in all_ids:
+        conn.execute("""
+            INSERT INTO question_progress (question_id, is_used, is_wrong)
+            VALUES (?, ?, ?)
+            ON CONFLICT(question_id) DO UPDATE SET
+                is_used = excluded.is_used,
+                is_wrong = excluded.is_wrong
+        """, (
+            qid,
+            1 if qid in used_ids else 0,
+            1 if qid in wrong_ids else 0
+        ))
+
+    # 同步所有既有紀錄，確保移除錯題/重置正式考試也會永久保存
+    conn.execute("""
+        UPDATE question_progress
+        SET is_used = 0
+        WHERE question_id NOT IN (
+            SELECT question_id FROM question_progress
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+
+
+def update_question_status(question_id, *, is_used=None, is_wrong=None):
+    """只修改指定題目的永久狀態。"""
+    qid = str(question_id)
+    conn = sqlite3.connect(DB_FILE)
+
+    row = conn.execute(
+        "SELECT is_used, is_wrong FROM question_progress WHERE question_id = ?",
+        (qid,)
+    ).fetchone()
+
+    current_used = row[0] if row else 0
+    current_wrong = row[1] if row else 0
+
+    new_used = current_used if is_used is None else (1 if is_used else 0)
+    new_wrong = current_wrong if is_wrong is None else (1 if is_wrong else 0)
+
+    conn.execute("""
+        INSERT INTO question_progress (question_id, is_used, is_wrong)
+        VALUES (?, ?, ?)
+        ON CONFLICT(question_id) DO UPDATE SET
+            is_used = excluded.is_used,
+            is_wrong = excluded.is_wrong
+    """, (qid, new_used, new_wrong))
+
+    conn.commit()
+    conn.close()
+
+
+init_database()
 
 @st.cache_data
 def load_data():
@@ -24,11 +122,14 @@ except Exception as e:
 # -----------------------------------------------------------------------------
 # 2. 初始化 Session State 狀態（個人歷程紀錄）
 # -----------------------------------------------------------------------------
-if 'used_ids' not in st.session_state:
-    st.session_state.used_ids = set()      # 正式考試已考過的 ID
+if 'used_ids' not in st.session_state or 'wrong_ids' not in st.session_state:
+    saved_used, saved_wrong = load_progress()
 
-if 'wrong_ids' not in st.session_state:
-    st.session_state.wrong_ids = set()     # 錯題本 ID
+    if 'used_ids' not in st.session_state:
+        st.session_state.used_ids = saved_used      # 正式考試已考過的 ID
+
+    if 'wrong_ids' not in st.session_state:
+        st.session_state.wrong_ids = saved_wrong    # 錯題本 ID
 
 if 'exam_paper' not in st.session_state:
     st.session_state.exam_paper = []       # 當前測驗的題目清單
@@ -55,6 +156,7 @@ st.sidebar.write(f"• 錯題本累積題數：**{len(st.session_state.wrong_ids
 
 if st.sidebar.button("🗑️ 重置正式考試抽題池"):
     st.session_state.used_ids = set()
+    save_progress(st.session_state.used_ids, st.session_state.wrong_ids)
     st.sidebar.success("已重置抽題紀錄，可重新開始循環！")
     st.rerun()
 
@@ -145,7 +247,7 @@ if mode == "正式考試":
     st.caption("每次從未考題庫中隨機抽出 10 題是非題與 30 題選擇題，考過的題目不會重複出現。")
     
     # 篩選未考過的題目
-    unused_df = df_all[~df_all['ID'].isin(st.session_state.used_ids)]
+    unused_df = df_all[~df_all['ID'].astype(str).isin(st.session_state.used_ids)]
     
     if st.button("🚀 開始/重新抽題 (產生40題考卷)") or st.session_state.current_mode != "formal":
         st.session_state.current_mode = "formal"
@@ -188,14 +290,65 @@ elif mode == "題型/分類考試":
 # -----------------------------------------------------------------------------
 elif mode == "錯誤題練習":
     st.header("📝 錯題本專項重測")
-    
+
+    # -------------------------------------------------------------------------
+    # 錯題本管理：手動新增 / 指定移除
+    # -------------------------------------------------------------------------
+    st.subheader("🛠️ 錯題本管理")
+
+    all_question_ids = [str(x) for x in df_all['ID'].tolist()]
+
+    # 手動新增題目
+    add_id = st.selectbox(
+        "新增指定題目到錯題本：",
+        options=all_question_ids,
+        format_func=lambda qid: (
+            f"{qid}｜{df_all.loc[df_all['ID'].astype(str) == qid, 'Question'].iloc[0][:70]}"
+        ),
+        key="add_wrong_question_id"
+    )
+
+    if st.button("➕ 新增至錯題本", key="add_wrong_btn"):
+        st.session_state.wrong_ids.add(str(add_id))
+        update_question_status(add_id, is_wrong=True)
+        st.success(f"題目 {add_id} 已加入錯題本。")
+        st.rerun()
+
+    # 指定移除題目
+    if st.session_state.wrong_ids:
+        wrong_ids_sorted = sorted(
+            st.session_state.wrong_ids,
+            key=lambda x: str(x)
+        )
+
+        remove_id = st.selectbox(
+            "從錯題本移除指定題目：",
+            options=wrong_ids_sorted,
+            format_func=lambda qid: (
+                f"{qid}｜{df_all.loc[df_all['ID'].astype(str) == qid, 'Question'].iloc[0][:70]}"
+                if not df_all.loc[df_all['ID'].astype(str) == qid].empty
+                else qid
+            ),
+            key="remove_wrong_question_id"
+        )
+
+        if st.button("➖ 從錯題本移除", key="remove_wrong_btn"):
+            st.session_state.wrong_ids.discard(str(remove_id))
+            update_question_status(remove_id, is_wrong=False)
+            st.success(f"題目 {remove_id} 已從錯題本移除。")
+            st.rerun()
+
+    st.markdown("---")
+
     if not st.session_state.wrong_ids:
-        st.info("🎉 太棒了！目前錯題本中沒有任何題目。")
+        st.info("目前錯題本中沒有任何題目。")
         st.session_state.exam_paper = []
     else:
-        wrong_df = df_all[df_all['ID'].isin(st.session_state.wrong_ids)]
+        wrong_df = df_all[
+            df_all['ID'].astype(str).isin(st.session_state.wrong_ids)
+        ]
         st.write(f"目前錯題庫共有 **{len(wrong_df)}** 題。")
-        
+
         if st.button("生成錯題考卷") or st.session_state.current_mode != "wrong":
             st.session_state.current_mode = "wrong"
             st.session_state.submitted = False
@@ -257,7 +410,8 @@ if st.session_state.exam_paper:
             
             # 標記為已考題（僅限正式考試模式）
             if st.session_state.current_mode == "formal":
-                st.session_state.used_ids.add(q_id)
+                st.session_state.used_ids.add(str(q_id))
+                update_question_status(q_id, is_used=True)
             
             # 判斷對錯
             is_correct = (normalized_user_ans == standard_ans)
@@ -265,12 +419,13 @@ if st.session_state.exam_paper:
             if is_correct:
                 score += 1
                 # 若在錯題模式下答對，從錯題本移出
-                if q_id in st.session_state.wrong_ids:
-                    st.session_state.wrong_ids.remove(q_id)
+                st.session_state.wrong_ids.discard(str(q_id))
+                update_question_status(q_id, is_wrong=False)
                 st.success(f"**第 {idx} 題：正確！**")
             else:
                 # 答錯或未作答，加入錯題本
-                st.session_state.wrong_ids.add(q_id)
+                st.session_state.wrong_ids.add(str(q_id))
+                update_question_status(q_id, is_wrong=True)
                 st.error(
                     f"**第 {idx} 題：錯誤！** | "
                     f"您的答案：`{user_ans}`（代碼 {normalized_user_ans}） | "
