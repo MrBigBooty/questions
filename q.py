@@ -69,7 +69,7 @@ def get_options_for_question(row):
     q_type = str(row['Type']).strip()
     
     # 若為是非題
-    if "是非" in q_type:
+    if "是非" in q_type or "TrueFalse" in q_type:
         return {"O": "O (正確)", "X": "X (錯誤)"}
     
     # 若為選擇題，動態收集 A~E 欄位有值的選項
@@ -82,8 +82,8 @@ def get_options_for_question(row):
 
 def generate_exam(df_subset, tf_count, mc_count):
     """自訂組卷邏輯"""
-    tf_pool = df_subset[df_subset['Type'].str.contains("是非", na=False)]
-    mc_pool = df_subset[df_subset['Type'].str.contains("選擇", na=False)]
+    tf_pool = df_subset[df_subset['Type'].astype(str).str.strip().isin(['是非', 'TrueFalse'])]
+    mc_pool = df_subset[df_subset['Type'].astype(str).str.strip().isin(['選擇', 'SingleChoice'])]
     
     selected_tf = tf_pool.sample(n=min(tf_count, len(tf_pool))).to_dict('records') if len(tf_pool) > 0 else []
     selected_mc = mc_pool.sample(n=min(mc_count, len(mc_pool))).to_dict('records') if len(mc_pool) > 0 else []
@@ -107,8 +107,8 @@ if mode == "正式考試":
         st.session_state.submitted = False
         st.session_state.user_answers = {}
         
-        tf_unused = unused_df[unused_df['Type'].str.contains("是非", na=False)]
-        mc_unused = unused_df[unused_df['Type'].str.contains("選擇", na=False)]
+        tf_unused = unused_df[unused_df['Type'].astype(str).str.strip().isin(['是非', 'TrueFalse'])]
+        mc_unused = unused_df[unused_df['Type'].astype(str).str.strip().isin(['選擇', 'SingleChoice'])]
         
         if len(tf_unused) < 10 or len(mc_unused) < 30:
             st.warning("⚠️剩餘未考題目不足以湊滿 10 題是非與 30 題選擇！將為您抽取剩餘的所有可用題目。")
