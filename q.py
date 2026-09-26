@@ -170,7 +170,11 @@ if st.session_state.exam_paper:
             q_id = q['ID']
             options_dict = get_options_for_question(q)
             
-            st.markdown(f"**第 {idx} 題 [{q['Type']}]（分類: {q['Category']}）**")
+            # 正式考試不顯示題型與分類，維持正式試卷介面
+            if st.session_state.current_mode == "formal":
+                st.markdown(f"**第 {idx} 題**")
+            else:
+                st.markdown(f"**第 {idx} 題 [{q['Type']}]（分類: {q['Category']}）**")
             st.write(q['Question'])
             
             # 單選題組件
