@@ -8,14 +8,6 @@ import sqlite3
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="個人專屬刷題系統", layout="wide")
 
-
-# -----------------------------------------------------------------------------
-# 1A. 永久保存使用者進度
-# -----------------------------------------------------------------------------
-# Streamlit 的 session_state 在重新整理頁面後會重新建立，因此：
-# - used_ids / wrong_ids 不只存在 session_state
-# - 同步寫入本機 SQLite
-# 只要 q.py 與 progress.db 位於同一個資料夾，重新整理/重啟程式後資料仍會保留。
 DB_FILE = "progress.db"
 
 
@@ -47,7 +39,6 @@ def load_progress():
 def save_progress(used_ids, wrong_ids):
     conn = sqlite3.connect(DB_FILE)
 
-    # 先確保所有目前資料都有紀錄
     all_ids = {str(x) for x in used_ids} | {str(x) for x in wrong_ids}
     for qid in all_ids:
         conn.execute("""
@@ -62,7 +53,6 @@ def save_progress(used_ids, wrong_ids):
             1 if qid in wrong_ids else 0
         ))
 
-    # 同步所有既有紀錄，確保移除錯題/重置正式考試也會永久保存
     conn.execute("""
         UPDATE question_progress
         SET is_used = 0
@@ -107,9 +97,7 @@ init_database()
 
 @st.cache_data
 def load_data():
-    # 讀取 CSV 檔，將所有欄位轉為字串並填補空值
     df = pd.read_csv('questions.csv', dtype=str).fillna('')
-    # 清除欄位前後空白
     df.columns = df.columns.str.strip()
     return df
 
@@ -126,29 +114,28 @@ if 'used_ids' not in st.session_state or 'wrong_ids' not in st.session_state:
     saved_used, saved_wrong = load_progress()
 
     if 'used_ids' not in st.session_state:
-        st.session_state.used_ids = saved_used      # 正式考試已考過的 ID
+        st.session_state.used_ids = saved_used
 
     if 'wrong_ids' not in st.session_state:
-        st.session_state.wrong_ids = saved_wrong    # 錯題本 ID
+        st.session_state.wrong_ids = saved_wrong
 
 if 'exam_paper' not in st.session_state:
-    st.session_state.exam_paper = []       # 當前測驗的題目清單
+    st.session_state.exam_paper = []
 
 if 'submitted' not in st.session_state:
-    st.session_state.submitted = False     # 當前交卷狀態
+    st.session_state.submitted = False
 
 if 'user_answers' not in st.session_state:
-    st.session_state.user_answers = {}     # 使用者作答紀錄
+    st.session_state.user_answers = {}
 
 if 'current_mode' not in st.session_state:
-    st.session_state.current_mode = None   # 當前考試模式
+    st.session_state.current_mode = None
 
 # -----------------------------------------------------------------------------
 # 3. 側邊欄：功能選單與狀態統計
 # -----------------------------------------------------------------------------
 st.sidebar.title("📚 刷題系統選單")
 
-# 顯示目前個人進度
 st.sidebar.markdown("---")
 st.sidebar.subheader("📊 答題進度統計")
 st.sidebar.write(f"• 正式考試已考題數：**{len(st.session_state.used_ids)}** / {len(df_all)}")
@@ -164,17 +151,15 @@ st.sidebar.markdown("---")
 mode = st.sidebar.radio("請選擇測驗模式：", ["正式考試", "題型/分類考試", "錯誤題練習"])
 
 # -----------------------------------------------------------------------------
-# 4. 輔助函式：產生題目選項
+# 4. 輔助函式：產生題目選項與格式化
 # -----------------------------------------------------------------------------
 def get_options_for_question(row):
     """根據 CSV 的 Type 建立選項，並使用與 Answer 一致的數字編碼。"""
     q_type = str(row['Type']).strip()
 
-    # 是非題：1=對、2=錯
     if q_type in ("TrueFalse", "是非題", "是非"):
         return {"1": "1. 對", "2": "2. 錯"}
 
-    # 選擇題：1=A、2=B、3=C、4=D、5=E
     options = {}
     option_map = [
         ("1", "A", "Option_A"),
@@ -196,7 +181,6 @@ def normalize_answer(answer, q_type):
     answer = str(answer).strip().upper()
     q_type = str(q_type).strip()
 
-    # 是非題：接受 1/2、對/錯、O/X
     if q_type in ("TrueFalse", "是非題", "是非"):
         mapping = {
             "1": "1",
@@ -210,7 +194,6 @@ def normalize_answer(answer, q_type):
         }
         return mapping.get(answer, answer)
 
-    # 選擇題：接受 1~5 或 A~E
     mapping = {
         "1": "1",
         "2": "2",
@@ -227,26 +210,22 @@ def normalize_answer(answer, q_type):
 
 
 def generate_exam(df_subset, tf_count, mc_count):
-    """自訂組卷邏輯"""
     tf_pool = df_subset[df_subset['Type'].astype(str).str.strip().isin(['是非', 'TrueFalse'])]
     mc_pool = df_subset[df_subset['Type'].astype(str).str.strip().isin(['選擇', 'SingleChoice'])]
     
     selected_tf = tf_pool.sample(n=min(tf_count, len(tf_pool))).to_dict('records') if len(tf_pool) > 0 else []
     selected_mc = mc_pool.sample(n=min(mc_count, len(mc_pool))).to_dict('records') if len(mc_pool) > 0 else []
     
-    # 正式考試題序固定：前 10 題是非題，後 30 題選擇題
-    # 不在這裡 shuffle，讓正式考試的題型位置固定。
     paper = selected_tf + selected_mc
     return paper
 
 # -----------------------------------------------------------------------------
-# 5. 模式一：正式考試 (10是非 + 30選擇，不重複抽題)
+# 5. 模式切換邏輯
 # -----------------------------------------------------------------------------
 if mode == "正式考試":
     st.header("🎯 正式考試模式")
     st.caption("每次從未考題庫中隨機抽出 10 題是非題與 30 題選擇題，考過的題目不會重複出現。")
     
-    # 篩選未考過的題目
     unused_df = df_all[~df_all['ID'].astype(str).isin(st.session_state.used_ids)]
     
     if st.button("🚀 開始/重新抽題 (產生40題考卷)") or st.session_state.current_mode != "formal":
@@ -263,9 +242,6 @@ if mode == "正式考試":
         st.session_state.exam_paper = generate_exam(unused_df, 10, 30)
         st.rerun()
 
-# -----------------------------------------------------------------------------
-# 6. 模式二：題型/分類考試
-# -----------------------------------------------------------------------------
 elif mode == "題型/分類考試":
     st.header("📂 題型與 Category 專項練習")
     
@@ -280,25 +256,16 @@ elif mode == "題型/分類考試":
         st.session_state.submitted = False
         st.session_state.user_answers = {}
         
-        # 按比例抽取或隨機抽取
         paper = cat_df.sample(n=num_questions).to_dict('records')
         st.session_state.exam_paper = paper
         st.rerun()
 
-# -----------------------------------------------------------------------------
-# 7. 模式三：錯誤題練習
-# -----------------------------------------------------------------------------
 elif mode == "錯誤題練習":
     st.header("📝 錯題本專項重測")
-
-    # -------------------------------------------------------------------------
-    # 錯題本管理：手動新增 / 指定移除
-    # -------------------------------------------------------------------------
     st.subheader("🛠️ 錯題本管理")
 
     all_question_ids = [str(x) for x in df_all['ID'].tolist()]
 
-    # 手動新增題目
     add_id = st.selectbox(
         "新增指定題目到錯題本：",
         options=all_question_ids,
@@ -314,7 +281,6 @@ elif mode == "錯誤題練習":
         st.success(f"題目 {add_id} 已加入錯題本。")
         st.rerun()
 
-    # 指定移除題目
     if st.session_state.wrong_ids:
         wrong_ids_sorted = sorted(
             st.session_state.wrong_ids,
@@ -357,84 +323,112 @@ elif mode == "錯誤題練習":
             st.rerun()
 
 # -----------------------------------------------------------------------------
-# 8. 考卷渲染與作答區 (通用邏輯)
+# 6. 考卷渲染與作答/核對區
 # -----------------------------------------------------------------------------
 if st.session_state.exam_paper:
     st.markdown("---")
     st.subheader(f"📋 當前考卷（共 {len(st.session_state.exam_paper)} 題）")
     
-    with st.form(key="exam_form"):
+    # 情況 A：尚未提交，顯示可填答表單
+    if not st.session_state.submitted:
+        with st.form(key="exam_form"):
+            for idx, q in enumerate(st.session_state.exam_paper, start=1):
+                q_id = q['ID']
+                options_dict = get_options_for_question(q)
+                
+                if st.session_state.current_mode == "formal":
+                    st.markdown(f"**第 {idx} 題**")
+                else:
+                    st.markdown(f"**第 {idx} 題 [{q['Type']}]（分類: {q['Category']}）**")
+                st.write(q['Question'])
+                
+                user_choice = st.radio(
+                    label=f"請選擇第 {idx} 題答案：",
+                    options=list(options_dict.keys()),
+                    format_func=lambda x: options_dict[x],
+                    key=f"q_{q_id}",
+                    index=None,
+                    label_visibility="collapsed"
+                )
+                
+                if user_choice:
+                    st.session_state.user_answers[q_id] = user_choice
+                    
+                st.markdown("---")
+                
+            submit_btn = st.form_submit_button("📤 提交考卷並核對答案", type="primary")
+            if submit_btn:
+                st.session_state.submitted = True
+                st.rerun()
+
+    # 情況 B：已提交，顯示含有紅綠標記的題目與核對結果
+    else:
+        score = 0
+        total = len(st.session_state.exam_paper)
+
         for idx, q in enumerate(st.session_state.exam_paper, start=1):
             q_id = q['ID']
             options_dict = get_options_for_question(q)
-            
-            # 正式考試不顯示題型與分類，維持正式試卷介面
-            if st.session_state.current_mode == "formal":
-                st.markdown(f"**第 {idx} 題**")
-            else:
-                st.markdown(f"**第 {idx} 題 [{q['Type']}]（分類: {q['Category']}）**")
-            st.write(q['Question'])
-            
-            # 單選題組件
-            user_choice = st.radio(
-                label=f"請選擇第 {idx} 題答案：",
-                options=list(options_dict.keys()),
-                format_func=lambda x: options_dict[x],
-                key=f"q_{q_id}",
-                index=None,
-                label_visibility="collapsed"
-            )
-            
-            if user_choice:
-                st.session_state.user_answers[q_id] = user_choice
-                
-            st.markdown("---")
-            
-        submit_btn = st.form_submit_button("📤 提交考卷並核對答案", type="primary")
-
-    # -------------------------------------------------------------------------
-    # 9. 計分與錯題紀錄處理
-    # -------------------------------------------------------------------------
-    if submit_btn:
-        st.session_state.submitted = True
-        score = 0
-        total = len(st.session_state.exam_paper)
-        
-        st.header("💯 測驗結果與解析")
-        
-        for idx, q in enumerate(st.session_state.exam_paper, start=1):
-            q_id = q['ID']
-            user_ans = st.session_state.user_answers.get(q_id, "未作答")
             standard_ans = normalize_answer(q['Answer'], q['Type'])
-            normalized_user_ans = normalize_answer(user_ans, q['Type'])
+            user_ans = st.session_state.user_answers.get(q_id, None)
+            normalized_user_ans = normalize_answer(user_ans, q['Type']) if user_ans else None
             
-            # 標記為已考題（僅限正式考試模式）
+            is_correct = (normalized_user_ans == standard_ans)
+            
+            # 更新狀態
             if st.session_state.current_mode == "formal":
                 st.session_state.used_ids.add(str(q_id))
                 update_question_status(q_id, is_used=True)
             
-            # 判斷對錯
-            is_correct = (normalized_user_ans == standard_ans)
-            
             if is_correct:
                 score += 1
-                # 若在錯題模式下答對，從錯題本移出
                 st.session_state.wrong_ids.discard(str(q_id))
                 update_question_status(q_id, is_wrong=False)
-                st.success(f"**第 {idx} 題：正確！**")
             else:
-                # 答錯或未作答，加入錯題本
                 st.session_state.wrong_ids.add(str(q_id))
                 update_question_status(q_id, is_wrong=True)
-                st.error(
-                    f"**第 {idx} 題：錯誤！** | "
-                    f"您的答案：`{user_ans}`（代碼 {normalized_user_ans}） | "
-                    f"標準答案：`{standard_ans}`"
-                )
+
+            # 顯示題目頭部與狀態
+            if st.session_state.current_mode == "formal":
+                title_text = f"**第 {idx} 題**"
+            else:
+                title_text = f"**第 {idx} 題 [{q['Type']}]（分類: {q['Category']}）**"
                 
+            if is_correct:
+                st.markdown(f"{title_text} :green[✔ 正確]")
+            else:
+                st.markdown(f"{title_text} :red[✖ 錯誤]")
+
+            st.write(q['Question'])
+
+            # 渲染選項並進行紅綠著色
+            for code, opt_text in options_dict.items():
+                is_std = (code == standard_ans)
+                is_user = (code == normalized_user_ans)
+
+                if is_std and is_user:
+                    # 選對：正確答案標綠色
+                    st.markdown(f"- :green[**{opt_text} (您的選擇 / 正確答案)**]")
+                elif is_std:
+                    # 這是正確答案，但使用者沒選或選錯：標綠色
+                    st.markdown(f"- :green[**{opt_text} (正確答案)**]")
+                elif is_user:
+                    # 使用者選錯的選項：標紅色
+                    st.markdown(f"- :red[**{opt_text} (您的選擇)**]")
+                else:
+                    # 其他未選選項：維持原樣
+                    st.markdown(f"- {opt_text}")
+
             if q.get('Explanation'):
                 st.info(f"💡 **解析：** {q['Explanation']}")
+                
             st.markdown("---")
-            
+
+        # 頂部/底部分數統計與重新開始按鈕
         final_score = round((score / total) * 100, 1) if total > 0 else 0
         st.metric(label="最終得分", value=f"{final_score} 分", delta=f"{score}/{total} 題")
+        
+        if st.button("🔄 重新進行測驗"):
+            st.session_state.submitted = False
+            st.session_state.user_answers = {}
+            st.rerun()
