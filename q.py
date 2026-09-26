@@ -65,20 +65,64 @@ mode = st.sidebar.radio("請選擇測驗模式：", ["正式考試", "題型/分
 # 4. 輔助函式：產生題目選項
 # -----------------------------------------------------------------------------
 def get_options_for_question(row):
-    """根據題目 Type 判斷並打包選項字典"""
+    """根據 CSV 的 Type 建立選項，並使用與 Answer 一致的數字編碼。"""
     q_type = str(row['Type']).strip()
-    
-    # 若為是非題
-    if "是非" in q_type or "TrueFalse" in q_type:
-        return {"O": "O (正確)", "X": "X (錯誤)"}
-    
-    # 若為選擇題，動態收集 A~E 欄位有值的選項
+
+    # 是非題：1=對、2=錯
+    if q_type in ("TrueFalse", "是非題", "是非"):
+        return {"1": "1. 對", "2": "2. 錯"}
+
+    # 選擇題：1=A、2=B、3=C、4=D、5=E
     options = {}
-    for opt_key, opt_col in [('A', 'Option_A'), ('B', 'Option_B'), ('C', 'Option_C'), ('D', 'Option_D'), ('E', 'Option_E')]:
+    option_map = [
+        ("1", "A", "Option_A"),
+        ("2", "B", "Option_B"),
+        ("3", "C", "Option_C"),
+        ("4", "D", "Option_D"),
+        ("5", "E", "Option_E"),
+    ]
+
+    for answer_code, letter, opt_col in option_map:
         if opt_col in row and str(row[opt_col]).strip() != "":
-            options[opt_key] = f"{opt_key}. {row[opt_col]}"
-            
+            options[answer_code] = f"{answer_code}. {row[opt_col]}"
+
     return options
+
+
+def normalize_answer(answer, q_type):
+    """將使用者答案與 CSV Answer 統一成 1~5 的數字格式。"""
+    answer = str(answer).strip().upper()
+    q_type = str(q_type).strip()
+
+    # 是非題：接受 1/2、對/錯、O/X
+    if q_type in ("TrueFalse", "是非題", "是非"):
+        mapping = {
+            "1": "1",
+            "2": "2",
+            "對": "1",
+            "錯": "2",
+            "O": "1",
+            "X": "2",
+            "TRUE": "1",
+            "FALSE": "2",
+        }
+        return mapping.get(answer, answer)
+
+    # 選擇題：接受 1~5 或 A~E
+    mapping = {
+        "1": "1",
+        "2": "2",
+        "3": "3",
+        "4": "4",
+        "5": "5",
+        "A": "1",
+        "B": "2",
+        "C": "3",
+        "D": "4",
+        "E": "5",
+    }
+    return mapping.get(answer, answer)
+
 
 def generate_exam(df_subset, tf_count, mc_count):
     """自訂組卷邏輯"""
@@ -88,8 +132,9 @@ def generate_exam(df_subset, tf_count, mc_count):
     selected_tf = tf_pool.sample(n=min(tf_count, len(tf_pool))).to_dict('records') if len(tf_pool) > 0 else []
     selected_mc = mc_pool.sample(n=min(mc_count, len(mc_pool))).to_dict('records') if len(mc_pool) > 0 else []
     
+    # 正式考試題序固定：前 10 題是非題，後 30 題選擇題
+    # 不在這裡 shuffle，讓正式考試的題型位置固定。
     paper = selected_tf + selected_mc
-    random.shuffle(paper)
     return paper
 
 # -----------------------------------------------------------------------------
@@ -207,14 +252,15 @@ if st.session_state.exam_paper:
         for idx, q in enumerate(st.session_state.exam_paper, start=1):
             q_id = q['ID']
             user_ans = st.session_state.user_answers.get(q_id, "未作答")
-            standard_ans = str(q['Answer']).strip().upper()
+            standard_ans = normalize_answer(q['Answer'], q['Type'])
+            normalized_user_ans = normalize_answer(user_ans, q['Type'])
             
             # 標記為已考題（僅限正式考試模式）
             if st.session_state.current_mode == "formal":
                 st.session_state.used_ids.add(q_id)
             
             # 判斷對錯
-            is_correct = (str(user_ans).strip().upper() == standard_ans)
+            is_correct = (normalized_user_ans == standard_ans)
             
             if is_correct:
                 score += 1
@@ -225,7 +271,11 @@ if st.session_state.exam_paper:
             else:
                 # 答錯或未作答，加入錯題本
                 st.session_state.wrong_ids.add(q_id)
-                st.error(f"**第 {idx} 題：錯誤！** | 您的答案：`{user_ans}` | 標準答案：`{standard_ans}`")
+                st.error(
+                    f"**第 {idx} 題：錯誤！** | "
+                    f"您的答案：`{user_ans}`（代碼 {normalized_user_ans}） | "
+                    f"標準答案：`{standard_ans}`"
+                )
                 
             if q.get('Explanation'):
                 st.info(f"💡 **解析：** {q['Explanation']}")
