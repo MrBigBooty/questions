@@ -284,8 +284,12 @@ elif mode == "錯誤題練習":
     st.markdown("---")
 
     if not st.session_state.wrong_ids:
-        st.info("目前錯題本中沒有任何題目。")
-        st.session_state.exam_paper = []
+        st.info("🎉 太棒了！目前錯題本中沒有任何題目。")
+        # 只有在「還沒有一份進行中/剛交卷的錯題考卷」時才清空，
+        # 否則會發生：這次剛好全部答對、wrong_ids 剛清空，結果連帶把
+        # 準備顯示的成績畫面一起清掉，變成一片空白。
+        if st.session_state.current_mode != "wrong":
+            st.session_state.exam_paper = []
     else:
         wrong_df = df_all[df_all['ID'].astype(str).isin(st.session_state.wrong_ids)]
         st.write(f"目前錯題庫共有 **{len(wrong_df)}** 題。")
