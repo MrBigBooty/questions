@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import random
 import json
 import datetime
 
@@ -197,16 +196,14 @@ def normalize_answer(answer, q_type):
     return mapping.get(answer, answer)
 
 def generate_exam(df_subset, tf_count, mc_count):
-    """自訂組卷邏輯，抽完後打亂順序，讓是非題與選擇題混合出現。"""
+    """自訂組卷邏輯：是非題固定排在前面，選擇題接在後面（各自組內順序仍是隨機抽取的）。"""
     tf_pool = df_subset[df_subset['Type'].apply(is_tf_type)]
     mc_pool = df_subset[df_subset['Type'].apply(is_mc_type)]
 
     selected_tf = tf_pool.sample(n=min(tf_count, len(tf_pool))).to_dict('records') if len(tf_pool) > 0 else []
     selected_mc = mc_pool.sample(n=min(mc_count, len(mc_pool))).to_dict('records') if len(mc_pool) > 0 else []
 
-    paper = selected_tf + selected_mc
-    random.shuffle(paper)
-    return paper
+    return selected_tf + selected_mc
 
 # -----------------------------------------------------------------------------
 # 5. 模式切換邏輯
